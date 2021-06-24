@@ -1,28 +1,67 @@
-library(dataRetrieval)  #will need to install if you havnt already
+library(dataRetrieval)
 library(dplyr)
-library(ggplot2)
 library(leaflet)
+library(plotly)
+library(shinythemes)
+library(shinycustomloader)
 
 ##########
 
 # User interface ----
-ui <- fluidPage(
-  leafletOutput("mymap"),
-  fluidRow(verbatimTextOutput("mymap_marker_click")),
-  fluidRow(textOutput("coords")),
+ui <- bootstrapPage(
+  theme= shinytheme("spacelab"),
   
-  fluidRow(column(8,
-                  sliderInput("date_slider", "", 
-                              min = as.Date("2020-01-01","%Y-%m-%d"), 
-                              max = as.Date("2020-12-31","%Y-%m-%d"), 
-                              value = c(as.Date("2020-01-01","%Y-%m-%d"), as.Date("2020-12-31","%Y-%m-%d"))),
-                  plotOutput("flowSeries")
-  ))
+  titlePanel(title=div(img(src="nasa.jpg"), img(src="ssai.png"), "Exploring USGS Water Data",
+                       style="z-index:1000;padding:0px 0px 0px 10px;"),
+             tags$head(tags$link(rel="shortcut icon", href="ssai.png"))),
   
+  navbarPage("Dashboard", id="nav", 
+             
+             tabPanel("Interactive map",
+                      div(class="outer",
+                          
+                          tags$head(
+                            # Include our custom CSS
+                            includeCSS("styles.css"),
+                            includeScript("gomap.js")
+                          ),
+                          
+                          absolutePanel(id = "controls", class = "panel panel-default", fixed = TRUE,
+                                        draggable = TRUE, top = "25%", left = 20, right = "auto", bottom = "auto",
+                                        width = 350, height = "auto", style = "z-index: 1;", ## z-index modification,
+                                        h3("USGS Hydro Data"),
+                                        
+                                        tags$div(class = "header", checked = NA,
+                                                 tags$b("Select Dates"),
+                                                 br()
+                                        ),
+                                        #textOutput("site"),
+                                        #uiOutput("Generate"),
+                                        sliderInput("date_slider", "", 
+                                                    min = as.Date("2020-01-01","%Y-%m-%d"), 
+                                                    max = as.Date("2020-12-31","%Y-%m-%d"), 
+                                                    value = c(as.Date("2020-01-01","%Y-%m-%d"), as.Date("2020-12-31","%Y-%m-%d"))),
+                                        
+                                        #plotlyOutput("flowSeries", height = 200)
+                          )),
+                      
+                      
+                      fluidRow(tags$style(type = "text/css", "#map {height: calc(100vh) !important;}"),
+                               withLoader(leafletOutput("mymap", width = "100%", height = "500px"), type="html", loader="loader1")),
+                      br(),
+                      fluidRow(plotlyOutput("flowSeries", height = 300))
+             ),
+             
+             tabPanel("Additional Information",
+                      fluidRow(column(12,
+                                      h3('Placeholder Tab',  style = "padding: 5px 10px 5px"),
+                                      br())))
+  )
 )
 
-server <- function(input, output, session) {
 
+server <- function(input, output, session) {
+  
   sites <- whatNWISsites(bBox=c(-83.0,36.5,-81.0,38.5), 
                          parameterCd=c('00060','00010'),
                          hasDataTypeCd="dv")
@@ -42,7 +81,6 @@ server <- function(input, output, session) {
   newGage <- newGage[c("site_no", "station_nm", "dec_lat_va", "dec_long_va", "Date", "Flow", "Wtemp")]
   
   # Clean Data
-  
   newGage <- na.omit(newGage)
   
   newCoords <- cbind(newGage['dec_long_va'], newGage['dec_lat_va'])
@@ -51,34 +89,86 @@ server <- function(input, output, session) {
     data.matrix(newCoords)
   }, ignoreNULL = FALSE)
   
+  
+  # Create custom icons
+  icons <- awesomeIcons(
+    icon = 'ios-close',
+    iconColor = 'black',
+    library = 'ion',
+    markerColor = "darkblue")
+  
+  clicked <- awesomeIcons(
+    icon = 'ios-close',
+    iconColor = 'black',
+    library = 'ion',
+    markerColor = "lightred")
+  
+  # Render map
   output$mymap <- renderLeaflet({
     leaflet(data = newGage) %>%
-      addProviderTiles(providers$Stamen.TonerLite) %>%
+      addProviderTiles(providers$CartoDB.Positron) %>%
       
       # Centre the map
       setView(lng = -82.0, 
               lat = 37.5, 
               zoom = 4) %>% 
       
-      addMarkers(data = points())
+      addAwesomeMarkers(data=points(), icon = icons)
+    #addMarkers(data = points())
   })
   
   observeEvent(input$mymap_marker_click, { 
-      p <- input$mymap_marker_click
-      print(p)
-      output$coords <- renderText(paste("Showing data for", round(p$lat, 2), "N, ", round(p$lng, 2), "E"))
-      pLat <- p$lat
-      plotGage <- subset(newGage, dec_lat_va == pLat)
-      output$flowSeries=renderPlot({
-        # Get date Range
-        date_range <- input$date_slider
-        ggplot(plotGage, aes(x=Date, y=Flow, size=Wtemp)) +
-          geom_point(colour = 'blue') +
-          xlim(date_range[1], date_range[2])
-      })
+    
+    # Click point
+    p <- input$mymap_marker_click
+    
+    # Create proxy map based on clicked point
+    proxy = leafletProxy("mymap") %>%
+      removeMarker(layerId="clicked") %>%
+      setView(lng = isolate(p$lng),
+              lat = isolate(p$lat),
+              zoom = 8) %>%
+      addAwesomeMarkers(lng = isolate(p$lng),
+                        lat = isolate(p$lat),
+                        layerId = "clicked",
+                        icon = clicked)
+    
+    # Subset Data Frame based on clicked point
+    pLat <- p$lat
+    plotGage <- subset(newGage, dec_lat_va == pLat)
+    
+    # Find site name
+    site_name = unique(plotGage$station_nm)
+    
+    # Produce Plotly figure
+    output$flowSeries=renderPlotly({
+      
+      # Date Range
+      date_range <- input$date_slider
+      
+      # Subset based on date range
+      plotGage <- subset(plotGage, Date>date_range[[1]] & Date < date_range[[2]]) %>%
+        arrange(desc(Date))
+      
+      # Plotting
+      plot_ly(plotGage,
+              x=~Date, 
+              y=~Flow, 
+              size=~Wtemp,
+              name = "Water Temperature (C)",
+              mode = "lines+markers") %>%
+        layout(title=paste("Hydrological data for ", site_name),
+               yaxis = list(title = "Streamflow (cfs)"),
+               xaxis = list(title = "Date"),
+               legend = list(x = 0.75, y = 0.9),
+               showlegend=TRUE)
+      
     })
+    
+    # Site Name
+    output$site <- renderText(paste("Showing data for", unique(plotGage$station_nm)))
+  })
 }
 
 # Run the app ----
 shinyApp(ui = ui, server = server)
-
